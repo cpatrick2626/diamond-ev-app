@@ -1,9 +1,8 @@
-
 <!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Diamond EV+ V31</title>
+<title>Diamond EV+ V33</title>
 
 <style>
 body { background:#0c0c0c; color:#fff; font-family:Arial; margin:0; }
@@ -26,7 +25,7 @@ button { width:90%; padding:14px; margin:10px; background:#00c853; border:none; 
 
 <body>
 
-<div class="header">DIAMOND EV+ V31</div>
+<div class="header">DIAMOND EV+ V33</div>
 <button onclick="load()">LOAD PICKS</button>
 
 <div id="out">Tap LOAD</div>
@@ -36,131 +35,213 @@ button { width:90%; padding:14px; margin:10px; background:#00c853; border:none; 
 const ODDS_KEY = "405f318f6be17dfd8ffdcd5f5b66df4b";
 
 // ===============================
-// NORMALIZE
+// HELPERS
 // ===============================
 function normalize(name){
   return name.toLowerCase().replace(/[^a-z ]/g,"").trim();
 }
 
+function safe(promise, fallback){
+  return Promise.race([
+    promise,
+    new Promise(res=>setTimeout(()=>res(fallback),4000))
+  ]);
+}
+
 // ===============================
-// SAFE FETCH (WITH TIMEOUT)
+// BALLPARK FACTORS
 // ===============================
-async function safeFetch(url, timeout=5000){
+const parkBoost = {
+  "Colorado Rockies": 12,
+  "New York Yankees": 8,
+  "Cincinnati Reds": 6,
+  "Boston Red Sox": 5,
+  "Oakland Athletics": -8
+};
+
+// ===============================
+// WEATHER (simple)
+// ===============================
+async function getWeather(){
   try{
-    const controller = new AbortController();
-    const id = setTimeout(()=>controller.abort(), timeout);
+    let r = await fetch("https://api.open-meteo.com/v1/forecast?latitude=39.1&longitude=-84.5&current_weather=true");
+    let d = await r.json();
+    return d.current_weather;
+  }catch{
+    return null;
+  }
+}
 
-    let res = await fetch(url, { signal: controller.signal });
-    clearTimeout(id);
+function weatherBoost(w){
+  if(!w) return 0;
 
-    return await res.json();
+  let boost = 0;
+
+  if(w.temperature > 85) boost += 5;
+  if(w.windspeed > 10) boost += 5;
+
+  return boost;
+}
+
+// ===============================
+// LINEUPS (approx via roster active)
+// ===============================
+async function getLineups(){
+  try{
+    let r = await fetch("https://statsapi.mlb.com/api/v1/teams?sportId=1&hydrate=roster");
+    let d = await r.json();
+
+    let active = new Set();
+
+    d.teams.forEach(t=>{
+      t.roster.roster.forEach(p=>{
+        active.add(p.person.fullName);
+      });
+    });
+
+    return active;
+
   }catch{
     return null;
   }
 }
 
 // ===============================
-// TIMEOUT WRAPPER
-// ===============================
-async function withTimeout(promise, fallback, ms=4000){
-  return Promise.race([
-    promise,
-    new Promise(res => setTimeout(()=>res(fallback), ms))
-  ]);
-}
-
-// ===============================
 // PLAYERS
 // ===============================
 async function getPlayers(){
+  try{
+    let r = await fetch("https://statsapi.mlb.com/api/v1/stats?stats=season&group=hitting&playerPool=ALL");
+    let d = await r.json();
 
-  let data = await safeFetch(
-    "https://statsapi.mlb.com/api/v1/stats?stats=season&group=hitting&playerPool=ALL"
-  );
+    return d.stats[0].splits.map(p=>({
+      name:p.player.fullName,
+      team:p.team.name,
+      iso:parseFloat(p.stat.iso)||0,
+      slg:parseFloat(p.stat.slg)||0,
+      hr:p.stat.homeRuns,
+      pa:p.stat.plateAppearances||1,
+      k:(p.stat.strikeOuts/p.stat.plateAppearances)||0
+    }));
 
-  if(!data) return [];
-
-  return data.stats[0].splits.slice(0,120).map(p=>({
-    name:p.player.fullName,
-    team:p.team.name,
-    iso:parseFloat(p.stat.iso)||0,
-    slg:parseFloat(p.stat.slg)||0,
-    hr:p.stat.homeRuns,
-    pa:p.stat.plateAppearances||1,
-    k:(p.stat.strikeOuts/p.stat.plateAppearances)||0
-  }));
+  }catch{
+    return [];
+  }
 }
 
 // ===============================
-// ODDS (BEST BOOK)
+// PITCHERS
+// ===============================
+async function getPitchers(){
+  try{
+    let r = await fetch("https://statsapi.mlb.com/api/v1/stats?stats=season&group=pitching&playerPool=ALL");
+    let d = await r.json();
+
+    let map={};
+
+    d.stats[0].splits.forEach(p=>{
+      map[p.player.fullName] = {
+        hr9:(p.stat.homeRuns/(p.stat.inningsPitched/9))||1
+      };
+    });
+
+    return map;
+
+  }catch{
+    return {};
+  }
+}
+
+// ===============================
+// GAMES
+// ===============================
+async function getGames(){
+  try{
+    let r = await fetch("https://statsapi.mlb.com/api/v1/schedule?sportId=1");
+    let d = await r.json();
+
+    let games=[];
+
+    d.dates.forEach(day=>{
+      day.games.forEach(g=>{
+        games.push({
+          home:g.teams.home.team.name,
+          away:g.teams.away.team.name,
+          homePitcher:g.teams.home.probablePitcher?.fullName,
+          awayPitcher:g.teams.away.probablePitcher?.fullName
+        });
+      });
+    });
+
+    return games;
+
+  }catch{
+    return [];
+  }
+}
+
+// ===============================
+// ODDS
 // ===============================
 async function getOdds(){
+  try{
+    let r = await fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${ODDS_KEY}&regions=us&markets=player_home_runs`);
+    let d = await r.json();
 
-  let data = await safeFetch(
-    `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${ODDS_KEY}&regions=us&markets=player_home_runs`
-  );
+    let map={};
 
-  let map = {};
+    d?.forEach(g=>{
+      g.bookmakers?.forEach(b=>{
+        b.markets?.forEach(m=>{
+          if(m.key==="player_home_runs"){
+            m.outcomes.forEach(o=>{
+              let name=normalize(o.name);
 
-  data?.forEach(g=>{
-    g.bookmakers?.forEach(b=>{
-
-      let book = b.title;
-
-      b.markets?.forEach(m=>{
-        if(m.key==="player_home_runs"){
-
-          m.outcomes.forEach(o=>{
-
-            let name = normalize(o.name);
-
-            if(!map[name] || o.price > map[name].odds){
-              map[name] = {
-                odds:o.price,
-                book:book
-              };
-            }
-
-          });
-
-        }
+              if(!map[name] || o.price>map[name].odds){
+                map[name]={odds:o.price,book:b.title};
+              }
+            });
+          }
+        });
       });
-
     });
-  });
 
-  return map;
+    return map;
+
+  }catch{
+    return {};
+  }
 }
 
 // ===============================
-// MATCH PLAYER → ODDS
+// MATCH ODDS
 // ===============================
-function findOdds(playerName, oddsMap){
-
-  let clean = normalize(playerName);
-  let last = clean.split(" ").pop();
-
-  let match = Object.keys(oddsMap).find(n=>n.includes(last));
-
-  return match ? oddsMap[match] : {odds:400, book:"Fallback"};
+function findOdds(name,map){
+  let last=normalize(name).split(" ").pop();
+  let match=Object.keys(map).find(n=>n.includes(last));
+  return match?map[match]:{odds:400,book:"Fallback"};
 }
 
 // ===============================
-// MODEL
+// MODEL (FULL CONTEXT)
 // ===============================
-function score(p){
-  let hrRate = p.hr / p.pa;
+function score(p,pitcher,weather){
+
+  let hrRate=p.hr/p.pa;
 
   return (
-    (p.iso*40) +
-    (p.slg*25) +
-    (hrRate*30) -
-    (p.k*15)
+    (p.iso*50) +
+    (p.slg*35) +
+    (hrRate*40) -
+    (p.k*20) +
+    ((pitcher?.hr9||1)*30) +
+    (parkBoost[p.team]||0) +
+    weatherBoost(weather)
   );
 }
 
-function calcEV(score, odds){
-  let prob=Math.min(score/120,.6);
+function calcEV(score,odds){
+  let prob=Math.min(score/150,.7);
   let payout=odds/100;
   return (prob*payout)-(1-prob);
 }
@@ -171,33 +252,43 @@ function calcEV(score, odds){
 async function load(){
 
   let out=document.getElementById("out");
-  out.innerHTML="Loading...";
+  out.innerHTML="Loading full model...";
 
-  let players = await withTimeout(getPlayers(), []);
-  let oddsMap = await withTimeout(getOdds(), {});
+  let [players,pitchers,games,oddsMap,lineups,weather] = await Promise.all([
+    safe(getPlayers(),[]),
+    safe(getPitchers(),{}),
+    safe(getGames(),[]),
+    safe(getOdds(),{}),
+    safe(getLineups(),null),
+    safe(getWeather(),null)
+  ]);
 
-  // fallback players if API fails
-  if(!players.length){
-    players = [
-      {name:"Aaron Judge",team:"Yankees",iso:.3,slg:.6,hr:30,pa:300,k:.25},
-      {name:"Shohei Ohtani",team:"Dodgers",iso:.28,slg:.58,hr:28,pa:290,k:.23}
-    ];
+  if(lineups){
+    players = players.filter(p=>lineups.has(p.name));
   }
 
   players = players.map(p=>{
 
-    let o = findOdds(p.name, oddsMap);
+    let game = games.find(g=>g.home===p.team || g.away===p.team);
 
-    let s = score(p);
-    let e = calcEV(s, o.odds);
+    let pitcherName = game
+      ? (game.home===p.team ? game.awayPitcher : game.homePitcher)
+      : null;
 
-    return {...p, odds:o.odds, book:o.book, ev:e};
+    let pitcher = pitchers[pitcherName];
+
+    let odds = findOdds(p.name,oddsMap);
+
+    let s = score(p,pitcher,weather);
+    let ev = calcEV(s,odds.odds);
+
+    return {...p,odds:odds.odds,book:odds.book,ev};
 
   });
 
   players.sort((a,b)=>b.ev-a.ev);
 
-  render(players.slice(0,10));
+  render(players.slice(0,15));
 }
 
 // ===============================
@@ -205,19 +296,19 @@ async function load(){
 // ===============================
 function render(players){
 
-  let html = "<div style='padding:10px;font-weight:bold;'>TOP PLAYS</div>";
+  let html="<div style='padding:10px;font-weight:bold;'>TOP EDGE PLAYS</div>";
 
-  html += players.map(p=>`
+  html+=players.map(p=>`
     <div class="card">
       <b>${p.name}</b><br>
       <span class="meta">${p.team}</span><br>
       <span class="meta">Odds +${p.odds}</span><br>
-      <span class="book">Best Book: ${p.book}</span><br>
+      <span class="book">${p.book}</span><br>
       <div class="ev">EV ${p.ev.toFixed(2)}</div>
     </div>
   `).join("");
 
-  document.getElementById("out").innerHTML = html;
+  document.getElementById("out").innerHTML=html;
 }
 
 </script>
